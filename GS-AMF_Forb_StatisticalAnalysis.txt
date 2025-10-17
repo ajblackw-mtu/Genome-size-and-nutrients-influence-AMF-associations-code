@@ -1,0 +1,200 @@
+### Churning Rapids AMF Statistical Analysis Code ###
+
+# Load packages 
+library(ape)
+library(phytools)
+library(dplyr)
+
+################ Pruning Already Existing Phylogeny #########################
+# Load in mega tree (from Hersch-Green et al. 2024)
+NutNet_tree <- read.tree("NutNet Tree.tre")
+
+# Change mismatched names in phylogeny
+######################################
+#Define names
+old_name <- "Tragopogon_pratensis"
+new_name <- "Tragopogon_miscellus"
+NutNet_tree$tip.label[NutNet_tree$tip.label == old_name] <- new_name
+
+old_name1 <- "Taraxacum_campylodes"
+new_name1 <- "Taraxacum_officinale"
+NutNet_tree$tip.label[NutNet_tree$tip.label == old_name1] <- new_name1
+
+old_name2 <- "Chrysanthemum_indicum"
+new_name2 <- "Chrysanthemum_leucanthemum"
+NutNet_tree$tip.label[NutNet_tree$tip.label == old_name2] <- new_name2
+
+#Continuing on ... 
+########################################
+# Load in species lists
+forb_species <- read.csv("ForbSpeciesList.csv")
+
+#Create sp_list as a character string, not a table, so it can be matched against the tip label character string
+forb_sp <-  forb_species$Species 
+
+# Match species list to tips on the NutNet tree 
+tip_labels = lapply( 1:length(forb_sp), 
+                     function( x ) grep( paste(forb_sp[[x]], collapse='.+' ),
+                                         NutNet_tree$tip.label, ignore.case=T ) )
+
+# Work out which species on your list are not in the tree, so you can investigate
+not_found = which( sapply( tip_labels, length )==0 )
+forb_sp[not_found] #0 not found (this is a good thing!)
+
+# Make sure there are no NAs in the tip labels 
+tip_labels <- sapply( tip_labels, function( x ) x[ 1 ] )
+not_NA <- !is.na(tip_labels )
+tip_labels <- tip_labels[ not_NA ] # TRUE
+NutNet_tree$tip.label[ tip_labels ] <- sp_list_all[ not_NA ]
+
+# Construct the tree - i.e., removing all species from the larger tree not in your list
+forb_phylogeny <- keep.tip(NutNet_tree, tip=tip_labels )
+
+# Save file
+write.tree(forb_phylogeny, "CorrectedForbSpecies_Phylogeny.tre")
+
+#After manually changing the position of Rudheckia hirta and the Solidago altissima
+#Load in corrected forb phylogeny 
+forb.phylo <- read.tree("CorrectedChurnAMFForb_Phylogeny.tre")
+plot(forb.phylo)
+
+################ Testing for phylogenetic signal of GS #########################
+# Load in packages
+library(ape)
+library(picante)
+library(phytools)
+library(tidyverse)
+
+# Breaking the forb tree information apart into tip label, node/branch lengths, etc. 
+str(forb.phylo)
+forb.phylo$edge # Provides a list of beginning and end node #s
+forb.phylo$tip.label # View each individual tip label (taxa) in the tree
+forb.phylo$edge.length # View edge length (length of each edge in relation to the root of the tree)
+forb.phylo$Nnode # Number of internal nodes on the tree 
+
+# Check to see if tree is binary. 
+is.binary(forb.phylo)
+
+# Check if the tree is rooted
+is.rooted(forb.phylo)
+
+# Change any zero-length branches to one-ten-thousandth of the tree size (Winternitz, 2016)
+forb.phylo$edge.length[forb.phylo$edge.length==0] <- max(nodeHeights(forb.phylo))*1e-4
+
+# Make sure tree tips match the data EXACTLY 
+forb.phylo$tip.label <- gsub(" ", "_", forb.phylo$tip.label) # Replaces white space with _
+
+# We want to test phylogenetic signal using Pagel's lambda
+# This has the smallest Type I error, and small Type II errors for phylogenies >20 species (Munkemuller et al. 2012)
+
+# Testing Pagel's lambda and Bloomberg's K
+
+#Load in library
+library(phytools) # measure phylo signal
+
+# IMPORT GS DATA HERE
+forbspeciesphydata <- read.csv("ForbSpeciesGS.csv")
+
+# Will use "phydata" to test for signal in all lifeforms (grasses, forbs)
+
+########################## PHYLOGENETIC SIGNAL #################################
+#### Test for signal of GS in the overall model
+
+# Isolate the species and their respective GS values. 
+# The columns we are isolating from "phydata" are Species and GS
+# ROWS MAY CHANGE WITH VARYING DATA SHEETS, BE SURE TO CHECK YOUR DATA BEFORE CONTINUING
+
+#Now create a list of named numbers (the species and the GS/log GS value) as a vector not a table
+forb_GS <- setNames(forbspeciesphydata$GS, forbspeciesphydata$Species)
+
+# Now use phylosig with the tree and your vector of named GS values for each FG you want to test
+############################## Pagel's lambda  ###############################
+phylosig(forb.phylo, log(forb_GS + 1), method = "lambda", test = TRUE)
+
+############################### Bloomberg's K  #################################
+# Blomberg's K, based on 10,000 randomizations #
+# ALL FUNCTIONAL GROUPS
+phylosig(forb.phylo, log(forb_GS + 1), method = "K", test = T, nsim= 10000)
+
+############ Phylogenetic Generalized Linear Mixed Model (PGLMM) ###############
+# See Ch. 4 (https://leanpub.com/correlateddata) for more information/examples
+
+# Load in libraries
+library(phyr)
+library(ape)
+library(geiger)
+library(nlme)
+library(phytools)
+library(ggplot2)
+library(lme4)
+library(dplyr)
+library(afex)
+library(lmerTest)
+library(mosaic)
+library(tidyverse)
+
+# Mixed-effects model with the phylogeny as a covariate argument in the pglmm function
+# This function gives you p-values for random effects and is easier to interpret.
+
+#Load in data
+bigdata <- read.csv("GS_AMF_CAREER_Mastersheet.csv") 
+forb_data <- filter(bigdata, Functional_Group == "Forb") 
+ 
+#Create a correlation matrix that explains the expected correlation from root to tip under Brownian motion.
+
+#The expected correlation is proportional to the amount of evolutionary history, from root to tips that these species share through common descent.
+
+#Data is essentially re-weighted per species
+
+#Correlation Matrix for all species within the phylogeny
+CM_Forbs <- vcv(forb.phylo, model = "Brownian", corr = TRUE)
+
+################################################################################
+############################ PGLMM MODELS ######################################
+
+#Load in library
+library(phytools)
+
+forb_data$Phenology = factor(forb_data$Phenology)
+forb_data$Treatment = factor(forb_data$Treatment)
+forb_data$Block = factor(forb_data$Block)
+
+#================================================================
+model1 <- pglmm(percent_arbuscules ~ log(GS + 1) + Treatment + log(GS + 1)*Treatment + Biomass +
+                  (1|Species__) + (1|Block), 
+                data= forb_data, 
+                cov_ranef = list(Species= CM_Forbs),
+                family="gaussian") 
+
+summary(model1) #view table after cov matrix has been standardized by R
+
+#================================================================
+model2 <- pglmm(percent_vesicles ~ log(GS + 1) + Treatment + log(GS + 1)*Treatment + Biomass +
+                  (1|Species__) + (1|Block), 
+                data= forb_data, 
+                cov_ranef = list(Species= CM_Forbs),
+                family="gaussian")  
+
+summary(model2) #view table after cov matrix has been standardized by R
+
+#================================================================
+model3 <- pglmm(percent_hyphae ~ log(GS + 1) + Treatment + log(GS + 1)*Treatment + Biomass +
+                  (1|Species__) + (1|Block), 
+                data= forb_data, 
+                cov_ranef = list(Species= CM_Forbs),
+                family="gaussian")  
+
+summary(model3) #view table after cov matrix has been standardized by R
+
+#================================================================
+model4 <- pglmm(arbusculetovesicle ~ log(GS + 1) + Treatment + log(GS + 1)*Treatment + Biomass +
+                  (1|Species__) + (1|Block), 
+                data= forb_data, 
+                cov_ranef = list(Species= CM_Forbs),
+                family="gaussian")  
+
+summary(model4) #view table after cov matrix has been standardized by R
+
+#================================================================
+
+# END FILE #
